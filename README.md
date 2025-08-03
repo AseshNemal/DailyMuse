@@ -1,0 +1,2 @@
+# DailyMuse
+Automated blog posting 
