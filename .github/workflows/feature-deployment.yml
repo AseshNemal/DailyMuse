@@ -57,34 +57,71 @@ jobs:
         JIRA_USER_EMAIL: ${{ secrets.JIRA_EMAIL }}
         JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
     
-    - name: Create Jira deployment
-      if: steps.jira.outputs.issue_key != ''
-      uses: atlassian/gajira-deployments@master
-      with:
-        issue: ${{ steps.jira.outputs.issue_key }}
-        environment: 'development'
-        state: 'successful'
-        deploymentSequenceNumber: ${{ github.run_number }}
-        displayName: 'Deploy to Dev - ${{ github.ref_name }}'
-        description: |
-          Automated deployment from feature branch: ${{ github.ref_name }}
-          Commit: ${{ github.sha }}
-          Workflow: ${{ github.workflow }}
-          Run ID: ${{ github.run_id }}
-    
-    - name: Add comment to Jira issue
+    - name: Update Jira issue with deployment info
       if: steps.jira.outputs.issue_key != ''
       uses: atlassian/gajira-comment@master
       with:
         issue: ${{ steps.jira.outputs.issue_key }}
         comment: |
-          🚀 *Deployment Successful*
+          🚀 **Deployment Status Update**
           
-          Branch: `${{ github.ref_name }}`
-          Commit: `${{ github.sha }}`
-          Environment: Development
+          h3. Deployment Details
+          ||Field||Value||
+          |Branch|{code}${{ github.ref_name }}{code}|
+          |Commit SHA|{code}${{ github.sha }}{code}|
+          |Environment|{color:green}*Development*{color}|
+          |Status|{color:green}✅ *SUCCESSFUL*{color}|
+          |Deployed At|$(date -u +"%Y-%m-%d %H:%M:%S UTC")|
+          |GitHub Run|[${{ github.run_number }}|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}]|
           
-          View deployment details: [GitHub Actions Run|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}]
+          h3. Quick Links
+          * [📋 View Full Deployment Log|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}]
+          * [🔗 View Repository|${{ github.server_url }}/${{ github.repository }}]
+          * [📝 View Commit|${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}]
+          
+          ---
+          _Automated deployment via GitHub Actions_
+    
+    - name: Transition Jira issue to In Progress
+      if: steps.jira.outputs.issue_key != ''
+      uses: atlassian/gajira-transition@master
+      with:
+        issue: ${{ steps.jira.outputs.issue_key }}
+        transition: "In Progress"
+      continue-on-error: true
+    
+    - name: Send Jira deployment webhook
+      if: steps.jira.outputs.issue_key != ''
+      run: |
+        curl -X POST \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Basic $(echo -n "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" | base64)" \
+          -d '{
+            "deploymentSequenceNumber": ${{ github.run_number }},
+            "updateSequenceNumber": ${{ github.run_number }},
+            "associations": [
+              {
+                "associationType": "issueIdOrKeys",
+                "values": ["${{ steps.jira.outputs.issue_key }}"]
+              }
+            ],
+            "displayName": "Deploy ${{ github.ref_name }} to Development",
+            "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "description": "Automated deployment from GitHub Actions",
+            "lastUpdated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "state": "successful",
+            "pipeline": {
+              "id": "${{ github.workflow }}",
+              "displayName": "${{ github.workflow }}",
+              "url": "${{ github.server_url }}/${{ github.repository }}/actions"
+            },
+            "environment": {
+              "id": "development",
+              "displayName": "Development",
+              "type": "development"
+            }
+          }' \
+          "${{ secrets.JIRA_URL }}/rest/deployments/0.1/bulk" || echo "Deployment webhook failed (this is expected if not configured)"
     
     - name: Deployment summary
       run: |
