@@ -1,0 +1,157 @@
+name: Feature Branch Deployment
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'feat/**'
+      - 'hotfix/**'
+      - 'bugfix/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up environment
+      run: |
+        echo "Setting up deployment environment..."
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit: ${{ github.sha }}"
+    
+    - name: Make deploy script executable
+      run: chmod +x deploy_script.sh
+    
+    - name: Run deployment script
+      run: ./deploy_script.sh
+      env:
+        BRANCH_NAME: ${{ github.ref_name }}
+        COMMIT_SHA: ${{ github.sha }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract Jira issue key
+      id: jira
+      run: |
+        # Extract Jira issue key from branch name (e.g., feature/PID-8-description -> PID-8)
+        BRANCH_NAME="${{ github.ref_name }}"
+        ISSUE_KEY=$(echo "$BRANCH_NAME" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+        
+        if [ -z "$ISSUE_KEY" ]; then
+          echo "No Jira issue key found in branch name: $BRANCH_NAME"
+          echo "issue_key=" >> $GITHUB_OUTPUT
+        else
+          echo "Found Jira issue key: $ISSUE_KEY"
+          echo "issue_key=$ISSUE_KEY" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Login to Jira
+      if: steps.jira.outputs.issue_key != ''
+      uses: atlassian/gajira-login@master
+      env:
+        JIRA_BASE_URL: ${{ secrets.JIRA_URL }}
+        JIRA_USER_EMAIL: ${{ secrets.JIRA_EMAIL }}
+        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+    
+    - name: Update Jira issue with deployment info
+      if: steps.jira.outputs.issue_key != ''
+      uses: atlassian/gajira-comment@master
+      with:
+        issue: ${{ steps.jira.outputs.issue_key }}
+        comment: |
+          🚀 **Deployment Status Update**
+          
+          h3. Deployment Details
+          ||Field||Value||
+          |Branch|{code}${{ github.ref_name }}{code}|
+          |Commit SHA|{code}${{ github.sha }}{code}|
+          |Environment|{color:green}*Development*{color}|
+          |Status|{color:green}✅ *SUCCESSFUL*{color}|
+          |Deployed At|$(date -u +"%Y-%m-%d %H:%M:%S UTC")|
+          |GitHub Run|[${{ github.run_number }}|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}]|
+          
+          h3. Quick Links
+          * [📋 View Full Deployment Log|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}]
+          * [🔗 View Repository|${{ github.server_url }}/${{ github.repository }}]
+          * [📝 View Commit|${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}]
+          
+          ---
+          _Automated deployment via GitHub Actions_
+    
+    - name: Transition Jira issue to In Progress
+      if: steps.jira.outputs.issue_key != ''
+      uses: atlassian/gajira-transition@master
+      with:
+        issue: ${{ steps.jira.outputs.issue_key }}
+        transition: "In Progress"
+      continue-on-error: true
+    
+    - name: Send Jira deployment webhook
+      if: steps.jira.outputs.issue_key != ''
+      run: |
+        curl -X POST \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Basic $(echo -n "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" | base64)" \
+          -d '{
+            "deploymentSequenceNumber": ${{ github.run_number }},
+            "updateSequenceNumber": ${{ github.run_number }},
+            "associations": [
+              {
+                "associationType": "issueIdOrKeys",
+                "values": ["${{ steps.jira.outputs.issue_key }}"]
+              }
+            ],
+            "displayName": "Deploy ${{ github.ref_name }} to Development",
+            "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "description": "Automated deployment from GitHub Actions",
+            "lastUpdated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "state": "successful",
+            "pipeline": {
+              "id": "${{ github.workflow }}",
+              "displayName": "${{ github.workflow }}",
+              "url": "${{ github.server_url }}/${{ github.repository }}/actions"
+            },
+            "environment": {
+              "id": "development",
+              "displayName": "Development",
+              "type": "development"
+            }
+          }' \
+          "${{ secrets.JIRA_URL }}/rest/deployments/0.1/bulk" || echo "Deployment webhook failed (this is expected if not configured)"
+    
+    - name: Deployment summary
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment:** Development" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status:** ✅ Successful" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -n "${{ steps.jira.outputs.issue_key }}" ]; then
+          echo "- **Jira Issue:** [${{ steps.jira.outputs.issue_key }}](${{ secrets.JIRA_URL }}/browse/${{ steps.jira.outputs.issue_key }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Jira Notification:** ✅ Sent" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Jira Notification:** ⚠️ No issue key found in branch name" >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name: Notify on failure
+      if: failure()
+      uses: atlassian/gajira-comment@master
+      with:
+        issue: ${{ steps.jira.outputs.issue_key }}
+        comment: |
+          ❌ *Deployment Failed*
+          
+          Branch: `${{ github.ref_name }}`
+          Commit: `${{ github.sha }}`
+          Environment: Development
+          
+          Please check the deployment logs: [GitHub Actions Run|${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}]
+      env:
+        JIRA_BASE_URL: ${{ secrets.JIRA_URL }}
+        JIRA_USER_EMAIL: ${{ secrets.JIRA_EMAIL }}
+        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
